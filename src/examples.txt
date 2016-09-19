@@ -1,0 +1,10 @@
+some project examples
+
+https://github.com/akashvyom/Water-level-controller
+https://github.com/wusiv/PoolWaterControl
+https://github.com/nateGeorge/arduino-water-level-management
+https://github.com/22kalsi/Water-Level-Indicator
+https://github.com/paulmilliken/Water-tank-level-meter
+https://github.com/iceglow/arduino-water-level-monitor
+
+https://github.com/venkimeip/AVR_WaterLevelController/tree/dev
