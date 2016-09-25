@@ -3,3 +3,7 @@
 .gcc-flags.json
 .piolibdeps
 /nbproject
+/refrence
+
+#settings file
+config.h
