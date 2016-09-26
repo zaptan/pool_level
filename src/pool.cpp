@@ -7,15 +7,23 @@
 #include <DHT.h>
 #include <DHT_U.h>
 
-#define DHTPIN            5         // Pin which is connected to the DHT sensor.
+#define TMPPIN            A2        // Analog pin 2 for water temp
+#define WATPIN            A1        // Analog pin 1 for water level
+#define DHTPIN            5         // digital pin 5 for DHT
+#define NEOPIN            11        // Digital pin for Neopixils
+#define SILPIN            10        // Digital pin for silinoid
+
 #define DHTTYPE           DHT22     // DHT 22 (AM2302)
+
+#define THERMISTORNOMINAL 10000
+#define SERIESRESISTOR    9980
+#define TEMPERATURENOMINAL 25
+#define BCOEFFICIENT 3950
 
 DHT_Unified dht(DHTPIN, DHTTYPE);
 
 uint32_t delayMS;
 
-const int sensorPin = 0;
-const int ledPin = 12;
 unsigned long previousMillis = 0;
 unsigned long currentMillis = 0;
 const long interval = 10000;
@@ -31,17 +39,31 @@ int airHumidity();
 void printWifiData();
 void setupDHT();
 void readDHT();
+void waterStatus();
+void publishio();
 
 char ssid[] = WIFI_SSID;                     // your network SSID (name)
 char pass[] = WIFI_PASS;       // your network key
 int status = WL_IDLE_STATUS;                     // the Wifi radio's status
 
 
+AdafruitIO_Feed *pooltemp = io.feed("pooltemp");
+AdafruitIO_Feed *poolrssi = io.feed("poolrssi");
+AdafruitIO_Feed *poollevel = io.feed("poollevel");
+AdafruitIO_Feed *airtemp = io.feed("airtemp");
+AdafruitIO_Feed *airrh = io.feed("airrh");
+AdafruitIO_Feed *poolpump = io.feed("poolpump");
+float ptm, atm, arh;
+long prss, plv;
+bool ppm;
+
 void setup() {
     WiFi.setPins(8,7,4,2); //correct pins for feather
     Serial.begin(9600);     // serial output for debug
-    pinMode(sensorPin, INPUT);
-    pinMode(ledPin, OUTPUT);
+    pinMode(WATPIN, INPUT);
+    pinMode(TMPPIN, INPUT);
+    pinMode(NEOPIN, OUTPUT);
+    tapStop();
     while ( status != WL_CONNECTED) {
       Serial.print("Attempting to connect to WPA network, SSID: ");
       Serial.println(ssid);
@@ -51,6 +73,21 @@ void setup() {
       delay(10000);
     }
     setupDHT();
+      Serial.print("Connecting to Adafruit IO");
+
+  // connect to io.adafruit.com
+  io.connect();
+
+  // wait for a connection
+  while(io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+
+  // we are connected
+  Serial.println();
+  Serial.println(io.statusText());
+
 }
 
 /*
@@ -66,25 +103,24 @@ void loop() {
     currentMillis = millis();
     if (currentMillis - previousMillis >= interval) {
         previousMillis = currentMillis;
-        Serial.println(waterRaw());
-        if (waterRaw() < limit) {
-            tapStart();
-        } else {
-            tapStop();
-        }
+    io.run();
     printWifiData();
     readDHT();
+    waterStatus();
+    publishio();
     }
 }
 
 void tapStart() {
     // tun on water
-    digitalWrite(ledPin, HIGH);
+    ppm = true;
+    digitalWrite(NEOPIN, HIGH);
 }
 
 void tapStop() {
     // tun off water
-    digitalWrite(ledPin, LOW);
+    ppm = false;
+    digitalWrite(NEOPIN, LOW);
 }
 
 
@@ -93,7 +129,8 @@ void tapStop() {
     }
 
     int waterRaw() {
-        return analogRead(sensorPin);
+        plv = analogRead(WATPIN);
+        return plv;
     }
 
     int waterTemp() {
@@ -130,6 +167,7 @@ void printWifiData() {
   Serial.println(mac[0], HEX);
   // print the received signal strength:
   long rssi = WiFi.RSSI();
+  prss = rssi;
   Serial.print("signal strength (RSSI):");
   Serial.println(rssi);
 
@@ -177,9 +215,17 @@ void readDHT() {
     Serial.println("Error reading temperature!");
   }
   else {
+    float atmf;
+    atm = event.temperature;
+    atmf = 9 * atm;
+    atmf /= 5;
+    atmf += 32;
+
     Serial.print("Temperature: ");
-    Serial.print(event.temperature);
-    Serial.println(" *C");
+    Serial.print(atm);
+    Serial.print(" *C  ");
+    Serial.print(atmf);
+    Serial.println(" *F");
   }
   // Get humidity event and print its value.
   dht.humidity().getEvent(&event);
@@ -187,8 +233,52 @@ void readDHT() {
     Serial.println("Error reading humidity!");
   }
   else {
+    arh = event.relative_humidity;
     Serial.print("Humidity: ");
-    Serial.print(event.relative_humidity);
+    Serial.print(arh);
     Serial.println("%");
   }
+}
+
+void waterStatus() {
+
+        float reading;
+        reading = analogRead(TMPPIN);
+        reading = (1023 / reading)  - 1;
+        reading = SERIESRESISTOR / reading;
+        float steinhart;
+        steinhart = reading / THERMISTORNOMINAL;
+        steinhart = log(steinhart);
+        steinhart /= BCOEFFICIENT;
+        steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15);
+        steinhart = 1.0 / steinhart;
+        steinhart -= 273.15; 
+        float steinhartf = 9 * steinhart;
+        steinhartf /= 5;
+        steinhartf += 32;
+        ptm = steinhart;
+        
+        Serial.println(" ___***___ ");
+        Serial.print("water level: ");
+        Serial.println(waterRaw());
+        Serial.print("water temp: ");
+        Serial.print(steinhart);
+        Serial.print(" *C  ");
+        Serial.print(steinhartf);
+        Serial.println(" *F");
+        if (waterRaw() < limit) {
+            tapStart();
+        } else {
+            tapStop();
+        }
+}
+
+void publishio() {
+  pooltemp->save(ptm);
+  poolrssi->save(prss);
+  poollevel->save(plv);
+  airtemp->save(atm);
+  airrh->save(arh);
+  poolpump->save(ppm);
+
 }
