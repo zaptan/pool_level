@@ -30,12 +30,9 @@ unsigned long stupid;
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "us.pool.ntp.org", -25200, 60000);
 
-unsigned long previousMillis = 0;
-unsigned long currentMillis = 0;
-const unsigned long interval = 5000;     // delay in mils for next loop
-const unsigned long uploadRate = 300000; // delay before next upload
-const int limit = 300;                   // water level limit
-unsigned long uploadclk = 0;
+const int limit = 500;
+int goal = 0;
+int lsec = 0;
 
 void tapStart();
 void tapStop();
@@ -71,6 +68,7 @@ bool ppm;
 
 void setup() {
     stupid = 0;
+    goal = 0;
     WiFi.setPins(8,7,4,2); //correct pins for feather
     Serial.begin(9600);     // serial output for debug
     pinMode(WATPIN, INPUT);
@@ -80,7 +78,7 @@ void setup() {
     tapStop();
     setupDHT();
     connectWiFi();
-    //connectIO();
+    connectIO();
     server.begin();
     WiFi.maxLowPowerMode();
     timeClient.begin();
@@ -129,22 +127,65 @@ void connectIO() {
 }
 
 void loop() {
-    currentMillis = millis();
-    //io.run();
-    if (currentMillis - previousMillis >= interval) {
-      previousMillis = currentMillis;
+    io.run();
+    gtimer();
+    runServer();
+}
+
+void gtimer() {
+    int mins = timeClient.getMinutes();
+    int secs = timeClient.getSeconds();
+    while(mins>9) {
+      mins -= 10;
+    }
+
+    if (((secs % 5)==0) && (secs != lsec)) {
+      lsec = secs;
       timeClient.update();
       readDHT();
       waterStatus();
       Serial.println(stupid++);
-      Serial.println(timeClient.getFormattedTime());
     }
-    if (currentMillis >= uploadclk) {
+    if (goal == 0) {
+        Serial.print("init goal ");
+        if (mins < 4) {
+          goal = 4;
+          Serial.println("4");
+          return;
+        } else {
+          goal = 9;
+          Serial.println("9");
+          return;
+        }
+      }
+
+    if (mins == goal) {
       
-      uploadclk = currentMillis + uploadRate;
-      //publishio();
-    }
-    runServer();
+        goal = goal +5;
+        if (goal>10) { goal -= 10; }
+
+        Serial.print("P: ");
+        Serial.print(ptm);
+        Serial.print(" L: ");
+        Serial.print(plv);
+        Serial.print(" A: ");
+        Serial.print(atm);
+        Serial.print(" H: ");
+        Serial.print(arh);
+        Serial.print(" S: ");
+        Serial.print(prss);
+        Serial.print(" ");
+        if (ptm==1) {
+          Serial.println("Pump ON");
+        } else {
+          Serial.println("Pump OFF");
+        }
+        publishio();
+        Serial.print("Upload: ");
+        Serial.println(timeClient.getFormattedTime());
+      }
+      //
+    
 }
 
 void tapStart() {
@@ -226,24 +267,17 @@ void waterStatus() {
 }
 
 void publishio() {
-  Serial.println(io.statusText());
-  if (io.status() < AIO_CONNECTED) 
-  {
-    io.connect();
-    uploadclk = currentMillis + 1000;
-  }
-  else {
     Serial.println("Sending Data");
     pooltemp->save(ptm);
     poolrssi->save(WiFi.RSSI());
     poollevel->save(plv);
     airtemp->save(atm);
     airrh->save(arh);
-    poolpump->save(ppm);
-    uploadclk = currentMillis + uploadRate;
-  }
-  
-  // when sussfull: 
+    if (ptm==1) {
+      poolpump->save(1);
+    } else {
+      poolpump->save(0);
+    }
 }
 void runServer() {
     // listen for incoming clients
