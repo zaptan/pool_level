@@ -2,10 +2,12 @@
 #include "config.h"
 #include <SPI.h>
 #include <WiFi101.h>
-
+#include <Time.h>  
+#include <NTPClient.h>
 #include <Adafruit_Sensor.h>
 #include <DHT.h>
 #include <DHT_U.h>
+#include <WiFiUdp.h>
 
 #define TMPPIN            A2        // Analog pin 2 for water temp
 #define WATPIN            A1        // Analog pin 1 for water level
@@ -16,18 +18,24 @@
 #define DHTTYPE           DHT22     // DHT 22 (AM2302)
 
 #define THERMISTORNOMINAL 10000
-#define SERIESRESISTOR    9980
-#define TEMPERATURENOMINAL 25
-#define BCOEFFICIENT 3950
+#define SERIESRESISTOR     9980
+#define TEMPERATURENOMINAL   25
+#define BCOEFFICIENT       3950
 
 DHT_Unified dht(DHTPIN, DHTTYPE);
 
 uint32_t delayMS;
+unsigned long stupid;
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "us.pool.ntp.org", -25200, 60000);
 
 unsigned long previousMillis = 0;
 unsigned long currentMillis = 0;
-const long interval = 10000;
-const int limit = 300;
+const unsigned long interval = 5000;     // delay in mils for next loop
+const unsigned long uploadRate = 300000; // delay before next upload
+const int limit = 300;                   // water level limit
+unsigned long uploadclk = 0;
 
 void tapStart();
 void tapStop();
@@ -41,10 +49,14 @@ void setupDHT();
 void readDHT();
 void waterStatus();
 void publishio();
+void runServer();
+void connectWiFi();
+void connectIO();
 
-char ssid[] = WIFI_SSID;                     // your network SSID (name)
+char ssid[] = WIFI_SSID;       // your network SSID (name)
 char pass[] = WIFI_PASS;       // your network key
-int status = WL_IDLE_STATUS;                     // the Wifi radio's status
+int status = WL_IDLE_STATUS;   // the Wifi radio's status
+WiFiServer server(80);
 
 
 AdafruitIO_Feed *pooltemp = io.feed("pooltemp");
@@ -58,99 +70,34 @@ long prss, plv;
 bool ppm;
 
 void setup() {
+    stupid = 0;
     WiFi.setPins(8,7,4,2); //correct pins for feather
     Serial.begin(9600);     // serial output for debug
     pinMode(WATPIN, INPUT);
     pinMode(TMPPIN, INPUT);
     pinMode(NEOPIN, OUTPUT);
+    pinMode(SILPIN, OUTPUT);
     tapStop();
-    while ( status != WL_CONNECTED) {
-      Serial.print("Attempting to connect to WPA network, SSID: ");
-      Serial.println(ssid);
-      status = WiFi.begin(ssid, pass);
-  
-      // wait 10 seconds for connection:
-      delay(10000);
-    }
     setupDHT();
-      Serial.print("Connecting to Adafruit IO");
+    connectWiFi();
+    //connectIO();
+    server.begin();
+    WiFi.maxLowPowerMode();
+    timeClient.begin();
+}
 
-  // connect to io.adafruit.com
-  io.connect();
-
-  // wait for a connection
-  while(io.status() < AIO_CONNECTED) {
+void connectWiFi() {
+  Serial.print("Attempting to connect to WPA network, SSID: ");
+  Serial.println(ssid);
+  while ( status != WL_CONNECTED) {
     Serial.print(".");
-    delay(500);
+    status = WiFi.begin(ssid, pass);
+    delay(250);
   }
-
-  // we are connected
-  Serial.println();
-  Serial.println(io.statusText());
-
-}
-
-/*
-the sensorPin returns a number based on how conductive whatever medium is
-touching the sensor. tapwater ranged from 200 to 320 pool water seems to go from
-258 to 415. there is a graph on the back of the sensor with 4cm marled out so I
-mapped the numbers to that. the sensor is slow it can take up to a min to settle
-on a value, it will always jump really high and then slowly come back down to
-settle on the actual value
-
- */
-void loop() {
-    currentMillis = millis();
-    if (currentMillis - previousMillis >= interval) {
-        previousMillis = currentMillis;
-    io.run();
-    printWifiData();
-    readDHT();
-    waterStatus();
-    publishio();
-    }
-}
-
-void tapStart() {
-    // tun on water
-    ppm = true;
-    digitalWrite(NEOPIN, HIGH);
-}
-
-void tapStop() {
-    // tun off water
-    ppm = false;
-    digitalWrite(NEOPIN, LOW);
-}
-
-
-    int waterLevel() {
-        return 30; //TODO: implement measurement
-    }
-
-    int waterRaw() {
-        plv = analogRead(WATPIN);
-        return plv;
-    }
-
-    int waterTemp() {
-        return 0;
-    }
-    int airTemp() {
-        return 0;
-    }
-    int airHumidity() {
-        return 0;
-    }
-
-void printWifiData() {
-  Serial.println("\n ****************************** ");
+  Serial.println("connected!");
   IPAddress ip = WiFi.localIP();
-  Serial.print("IP Address: ");
+  Serial.print("IP : ");
   Serial.println(ip);
-  Serial.print("SSID: ");
-  Serial.println(WiFi.SSID());
-  // print your MAC address:
   byte mac[6];
   WiFi.macAddress(mac);
   Serial.print("MAC address: ");
@@ -165,18 +112,53 @@ void printWifiData() {
   Serial.print(mac[1], HEX);
   Serial.print(":");
   Serial.println(mac[0], HEX);
-  // print the received signal strength:
-  long rssi = WiFi.RSSI();
-  prss = rssi;
-  Serial.print("signal strength (RSSI):");
-  Serial.println(rssi);
-
-  // print the encryption type:
-  byte encryption = WiFi.encryptionType();
-  Serial.print("Encryption Type:");
-  Serial.println(encryption, HEX);
-  Serial.println();
 }
+
+void connectIO() {
+  Serial.print("Connecting to Adafruit IO");
+  // connect to io.adafruit.com
+  io.connect();
+  // wait for a connection
+  while(io.status() < AIO_CONNECTED) {
+    Serial.print(".");
+    delay(500);
+  }
+  // we are connected
+  Serial.println();
+  Serial.println(io.statusText());
+}
+
+void loop() {
+    currentMillis = millis();
+    //io.run();
+    if (currentMillis - previousMillis >= interval) {
+      previousMillis = currentMillis;
+      timeClient.update();
+      readDHT();
+      waterStatus();
+      Serial.println(stupid++);
+      Serial.println(timeClient.getFormattedTime());
+    }
+    if (currentMillis >= uploadclk) {
+      
+      uploadclk = currentMillis + uploadRate;
+      //publishio();
+    }
+    runServer();
+}
+
+void tapStart() {
+  // tun on water
+  ppm = true;
+  digitalWrite(NEOPIN, HIGH);
+}
+
+void tapStop() {
+  // tun off water
+  ppm = false;
+  digitalWrite(NEOPIN, LOW);
+}
+
 
 void setupDHT() {
   dht.begin();
@@ -215,17 +197,7 @@ void readDHT() {
     Serial.println("Error reading temperature!");
   }
   else {
-    float atmf;
     atm = event.temperature;
-    atmf = 9 * atm;
-    atmf /= 5;
-    atmf += 32;
-
-    Serial.print("Temperature: ");
-    Serial.print(atm);
-    Serial.print(" *C  ");
-    Serial.print(atmf);
-    Serial.println(" *F");
   }
   // Get humidity event and print its value.
   dht.humidity().getEvent(&event);
@@ -234,51 +206,104 @@ void readDHT() {
   }
   else {
     arh = event.relative_humidity;
-    Serial.print("Humidity: ");
-    Serial.print(arh);
-    Serial.println("%");
   }
 }
 
 void waterStatus() {
-
-        float reading;
-        reading = analogRead(TMPPIN);
-        reading = (1023 / reading)  - 1;
-        reading = SERIESRESISTOR / reading;
-        float steinhart;
-        steinhart = reading / THERMISTORNOMINAL;
-        steinhart = log(steinhart);
-        steinhart /= BCOEFFICIENT;
-        steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15);
-        steinhart = 1.0 / steinhart;
-        steinhart -= 273.15; 
-        float steinhartf = 9 * steinhart;
-        steinhartf /= 5;
-        steinhartf += 32;
-        ptm = steinhart;
-        
-        Serial.println(" ___***___ ");
-        Serial.print("water level: ");
-        Serial.println(waterRaw());
-        Serial.print("water temp: ");
-        Serial.print(steinhart);
-        Serial.print(" *C  ");
-        Serial.print(steinhartf);
-        Serial.println(" *F");
-        if (waterRaw() < limit) {
-            tapStart();
-        } else {
-            tapStop();
-        }
+  float reading;
+  reading = analogRead(TMPPIN);
+  reading = (1023 / reading)  - 1;
+  reading = SERIESRESISTOR / reading;
+  float steinhart;
+  steinhart = reading / THERMISTORNOMINAL;
+  steinhart = log(steinhart);
+  steinhart /= BCOEFFICIENT;
+  steinhart += 1.0 / (TEMPERATURENOMINAL + 273.15);
+  steinhart = 1.0 / steinhart;
+  steinhart -= 273.15; 
+  ptm = steinhart;
+  plv = analogRead(WATPIN);
 }
 
 void publishio() {
-  pooltemp->save(ptm);
-  poolrssi->save(prss);
-  poollevel->save(plv);
-  airtemp->save(atm);
-  airrh->save(arh);
-  poolpump->save(ppm);
+  Serial.println(io.statusText());
+  if (io.status() < AIO_CONNECTED) 
+  {
+    io.connect();
+    uploadclk = currentMillis + 1000;
+  }
+  else {
+    Serial.println("Sending Data");
+    pooltemp->save(ptm);
+    poolrssi->save(WiFi.RSSI());
+    poollevel->save(plv);
+    airtemp->save(atm);
+    airrh->save(arh);
+    poolpump->save(ppm);
+    uploadclk = currentMillis + uploadRate;
+  }
+  
+  // when sussfull: 
+}
+void runServer() {
+    // listen for incoming clients
+  WiFiClient client = server.available();
+  if (client) {
+    Serial.println("new client");
+    // an http request ends with a blank line
+    boolean currentLineIsBlank = true;
+    while (client.connected()) {
+      if (client.available()) {
+        char c = client.read();
+        Serial.write(c);
+        // if you've gotten to the end of the line (received a newline
+        // character) and the line is blank, the http request has ended,
+        // so you can send a reply
+        if (c == '\n' && currentLineIsBlank) {
+          // send a standard http response header
+          client.println("HTTP/1.1 200 OK");
+          client.println("Content-Type: text/html");
+          client.println("Connection: close");  // the connection will be closed after completion of the response
+          //client.println("Refresh: 5");  // refresh the page automatically every 5 sec
+          client.println();
+          client.println("<!DOCTYPE HTML>");
+          client.println("<html>");
+            client.print("plv ");
+            client.print(plv);
+            client.println("<br />");
+            client.print("ptm ");
+            client.print(ptm);
+            client.println("<br />");
+            client.print("atm ");
+            client.print(atm);
+            client.println("<br />");
+            client.print("arh ");
+            client.print(arh);
+            client.println("<br />");
+            client.print("ppm ");
+            client.print(ppm);
+            client.println("<br />");
+            client.print("prss ");
+            client.print(prss);
+            client.println("<br />");
+          client.println("</html>");
+          break;
+        }
+        if (c == '\n') {
+          // you're starting a new line
+          currentLineIsBlank = true;
+        }
+        else if (c != '\r') {
+          // you've gotten a character on the current line
+          currentLineIsBlank = false;
+        }
+      }
+    }
+    // give the web browser time to receive the data
+    //delay(1);
 
+    // close the connection:
+    client.stop();
+    Serial.println("client disonnected");
+  }
 }
